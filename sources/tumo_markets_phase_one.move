@@ -184,6 +184,169 @@ module tumo_markets_phase_one::tumo_markets_phase_one {
         coin::from_balance(withdrawn, ctx)
     }
 
+    // ==================== Position Operations ====================
+
+    /// Mở một Position mới (Long hoặc Short)
+    public fun open_position(
+        market: &mut Market,
+        collateral_coin: Coin<OCT>,
+        size: u64,
+        entry_price: u64,
+        direction: u8,
+        clock: &Clock,
+        ctx: &mut TxContext
+    ) {
+        assert!(!market.is_paused, EMarketPaused);
+        assert!(size > 0, EInvalidSize);
+        assert!(direction == DIRECTION_LONG || direction == DIRECTION_SHORT, EInvalidDirection);
+
+        let owner = tx_context::sender(ctx);
+        let collateral = coin::value(&collateral_coin);
+        assert!(collateral > 0, EInvalidCollateral);
+
+        
+        let available_liquidity = balance::value(&market.liquidity_pool);
+        assert!(available_liquidity >= size, EInsufficientLiquidity);
+
+        // Nạp collateral vào pool
+        let collateral_balance = coin::into_balance(collateral_coin);
+        balance::join(&mut market.liquidity_pool, collateral_balance);
+
+        // Cập nhật market state
+        market.total_positions = market.total_positions + 1;
+        market.total_locked_collateral = market.total_locked_collateral + collateral;
+
+        let timestamp = clock::timestamp_ms(clock);
+        let market_id = object::id(market);
+
+        // Tạo Position object
+        let position = Position {
+            id: object::new(ctx),
+            owner,
+            size,
+            collateral,
+            entry_price,
+            direction,
+            open_timestamp: timestamp,
+            market_id,
+        };
+
+        let position_id = object::id(&position);
+
+        event::emit(PositionOpened {
+            position_id,
+            owner,
+            size,
+            collateral,
+            entry_price,
+            direction,
+            timestamp,
+        });
+
+        transfer::transfer(position, owner);
+    }
+
+
+    /// Đóng Position và trả lại collateral (+ PnL nếu có)
+    public fun close_position(
+        market: &mut Market,
+        position: Position,
+        exit_price: u64,
+        ctx: &mut TxContext
+    ): Coin<OCT> {
+        assert!(!market.is_paused, EMarketPaused);
+
+    
+        let Position {
+            id,
+            owner,
+            size,
+            collateral,
+            entry_price,
+            direction,
+            open_timestamp: _,
+            market_id: _,
+        } = position;
+
+        // Verify owner
+        let sender = tx_context::sender(ctx);
+        assert!(sender == owner, ENotPositionOwner);
+
+        let position_id = object::uid_to_inner(&id);
+
+        // Tính PnL (simplified)
+        let (pnl, is_profit) = calculate_pnl(size, entry_price, exit_price, direction);
+
+        // Tính số tiền trả lại
+        let return_amount = if (is_profit) {
+            let profit = pnl;
+            // let max_profit = balance::value(&market.liquidity_pool) - market.total_locked_collateral + collateral;
+            // let actual_profit = if (profit > max_profit - collateral) { max_profit - collateral } else { profit };
+            // collateral + actual_profit
+            collateral + profit
+        } else {
+            let loss = pnl;
+            // if (loss >= collateral) { 0 } else { collateral - loss }
+            assert!(loss < collateral, EInsufficientLiquidity);
+            collateral - loss
+        };
+        assert!(return_amount <= balance::value(&market.liquidity_pool), EInsufficientLiquidity);
+
+        // Cập nhật market state
+        market.total_positions = market.total_positions - 1;
+        market.total_locked_collateral = market.total_locked_collateral - collateral;
+
+        // Xóa position object
+        object::delete(id);
+
+        event::emit(PositionClosed {
+            position_id,
+            owner,
+            size,
+            collateral_returned: return_amount,
+            pnl,
+            is_profit,
+        });
+
+        // Trả lại tiền cho user
+        if (return_amount > 0) {
+            let return_balance = balance::split(&mut market.liquidity_pool, return_amount);
+            coin::from_balance(return_balance, ctx)
+        } else {
+            coin::zero<OCT>(ctx)
+        }
+    }
+
+    // ==================== Helper Functions ====================
+
+    /// Tính PnL đơn giản
+    /// Returns (pnl_amount, is_profit)
+    fun calculate_pnl(size: u64, entry_price: u64, exit_price: u64, direction: u8): (u64, bool) {
+        if (direction == DIRECTION_LONG) {
+            // Long: profit khi giá tăng
+            if (exit_price > entry_price) {
+                let price_diff = exit_price - entry_price;
+                let pnl = (size * price_diff) / entry_price;
+                (pnl, true)
+            } else {
+                let price_diff = entry_price - exit_price;
+                let pnl = (size * price_diff) / entry_price;
+                (pnl, false)
+            }
+        } else {
+            // Short: profit khi giá giảm
+            if (exit_price < entry_price) {
+                let price_diff = entry_price - exit_price;
+                let pnl = (size * price_diff) / entry_price;
+                (pnl, true)
+            } else {
+                let price_diff = exit_price - entry_price;
+                let pnl = (size * price_diff) / entry_price;
+                (pnl, false)
+            }
+        }
+    }
+
     // ==================== Admin Functions ====================
 
     /// Pause/Unpause Market
