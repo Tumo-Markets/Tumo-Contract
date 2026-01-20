@@ -120,7 +120,7 @@ fun init(_otw: TUMO_MARKETS_CORE, ctx: &mut TxContext) {
     transfer::transfer(lp_cap, admin);
 }
 
-public fun create_market<CoinXType>(_admin_cap: &AdminCap, ctx: &mut TxContext) {
+public fun create_market<CoinXType>(_admin_cap: &mut AdminCap, ctx: &mut TxContext) {
     let copy_market = Market<CoinXType> {
         id: object::new(ctx),
         is_paused: false,
@@ -132,7 +132,7 @@ public fun create_market<CoinXType>(_admin_cap: &AdminCap, ctx: &mut TxContext) 
     });
 }
 
-public fun create_liquidity_pool<USDHType>(_admin_cap: &AdminCap, ctx: &mut TxContext) {
+public fun create_liquidity_pool<USDHType>(_admin_cap: &mut AdminCap, ctx: &mut TxContext) {
     let liquidity_pool = LiquidityPool<USDHType> {
         id: object::new(ctx),
         balance: balance::zero(),
@@ -420,9 +420,9 @@ public fun direction_short(): u8 { DIRECTION_SHORT }
 #[test_only]
 public fun init_for_testing(ctx: &mut TxContext) {
     init(TUMO_MARKETS_CORE {}, ctx);
-    let admin_cap = AdminCap { id: object::new(ctx) };
-    create_market<OCT>(&admin_cap, ctx);
-    create_liquidity_pool<OCT>(&admin_cap, ctx);
+    let mut admin_cap = AdminCap { id: object::new(ctx) };
+    create_market<OCT>(&mut admin_cap, ctx);
+    create_liquidity_pool<OCT>(&mut admin_cap, ctx);
     transfer::transfer(admin_cap, tx_context::sender(ctx));
 }
 
