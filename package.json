@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "@onelabs/sui": "^1.26.2",
+    "dotenv": "^17.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.9"
+  }
+}

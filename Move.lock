@@ -3,7 +3,7 @@
 
 [move]
 version = 3
-manifest_digest = "0FAC8B54DA15E8C01945ECEB0DD408AE7325ED0E577B7BFB05EA03841004C0C5"
+manifest_digest = "BCAC035E07B6B5EF611BF39A38F6D4CFE2577C5F6E172E8F9BBD7A40BA79E77B"
 deps_digest = "3C4103934B1E040BB6B23F1D610B4EF9F2F1166A50A104EADCF77467C004C600"
 dependencies = [
   { id = "MoveStdlib", name = "MoveStdlib" },
@@ -39,8 +39,16 @@ use_environment = "testnet"
 manifest_digest = "7AFB66695545775FBFBB2D3078ADFD084244D5002392E837FDE21D9EA1C6D01C"
 deps = { MoveStdlib = "MoveStdlib" }
 
-[pinned.testnet.tumo_markets_phase_one]
+[pinned.testnet.tumo_markets]
 source = { root = true }
 use_environment = "testnet"
 manifest_digest = "DDE6AB9D4C86EF9672A18ABA64B486801D617D87A90B1C05AFC0EDE13A2D5DB1"
 deps = { MoveStdlib = "MoveStdlib", One = "One" }
+
+[env]
+
+[env.testnet]
+chain-id = "1bd5c965"
+original-published-id = "0x247654d14d0c7f1aeab5647bba02d69e2260ce54ae96d02c1a049505afccda92"
+latest-published-id = "0x247654d14d0c7f1aeab5647bba02d69e2260ce54ae96d02c1a049505afccda92"
+published-version = "1"
