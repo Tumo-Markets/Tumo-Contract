@@ -5,11 +5,11 @@ use one::clock::{Self, Clock};
 use one::coin::{Self, Coin};
 use one::event;
 use one::object::{Self, UID, ID};
-use one::transfer;
 use one::oct::OCT;
-use one::tx_context::{Self, TxContext};
 use one::table::{Self, Table};
-use tumo_markets::oracle::{PriceFeed};
+use one::transfer;
+use one::tx_context::{Self, TxContext};
+use tumo_markets::oracle::PriceFeed;
 
 // ==================== Error Codes ====================
 const ENotAdmin: u64 = 0;
@@ -20,14 +20,17 @@ const EInvalidDirection: u64 = 4;
 const EInvalidSize: u64 = 5;
 const EInvalidCollateral: u64 = 6;
 const EPositionNotFound: u64 = 7;
-const EPositionExists: u64 = 8;
-const EDirectionMismatch: u64 = 9;
+const EDirectionMismatch: u64 = 8;
+const EInsufficientLiquidity: u64 = 9;
+const ECannotLiquidate: u64 = 10;
 
 // ==================== Constants ====================
 const LONG: u8 = 0;
 const SHORT: u8 = 1;
-/// price được lưu theo dạng: price_decimal * PRICE_SCALE
-const PRICE_SCALE: u64 = 1_000_000;
+// 10% maintenance margin
+const MAINTENANCE_MARGIN_PCT: u64 = 10;
+// Liquidator gets 10% of remaining collateral
+const LIQUIDATOR_REWARD_PCT: u64 = 10;
 
 public struct LiquidityPool<phantom USDHType> has key {
     id: UID,
@@ -35,13 +38,13 @@ public struct LiquidityPool<phantom USDHType> has key {
 }
 // ==================== Market ====================
 
-public struct Market<phantom CoinXType> has key { // Trading Market for CoinX/USDH
+public struct Market<phantom CoinXType> has key {
+    // Trading Market for CoinX/USDH
     id: UID,
     leverage: u8,
     is_paused: bool,
     positions: Table<address, Position<CoinXType>>,
 }
-
 
 // ==================== Position Entity (The Ticket) ====================
 /// Đối tượng đại diện cho vị thế của User
@@ -114,6 +117,17 @@ public struct MarketPaused has copy, drop {
     paused: bool,
 }
 
+public struct PositionLiquidated has copy, drop {
+    owner: address,
+    market_id: ID,
+    liquidator: address,
+    size: u64,
+    collateral: u64,
+    pnl: u64,
+    amount_returned_to_liquidator: u64,
+    timestamp: u64,
+}
+
 // ==================== One-Time Witness ====================
 public struct TUMO_MARKETS_CORE has drop {}
 
@@ -137,7 +151,7 @@ public fun create_market<CoinXType>(_admin_cap: &AdminCap, leverage: u8, ctx: &m
         id: object::new(ctx),
         leverage,
         is_paused: false,
-        positions: table::new(ctx)
+        positions: table::new(ctx),
     };
     let market_id = object::id(&copy_market);
     transfer::share_object(copy_market);
@@ -154,6 +168,7 @@ public fun create_liquidity_pool<USDHType>(_admin_cap: &AdminCap, ctx: &mut TxCo
     };
     transfer::share_object(liquidity_pool);
 }
+
 // ==================== Liquidity Operations ====================
 public fun add_liquidity<USDHType>(
     liquidity_pool: &mut LiquidityPool<USDHType>,
@@ -224,7 +239,6 @@ public fun open_position<USDHType, CoinXType>(
     let owner = tx_context::sender(ctx);
     let payment_collateral = coin::value(&payment_collateral_coin);
 
-
     let collateral_balance = coin::into_balance(payment_collateral_coin);
     balance::join(&mut liquidity_pool.balance, collateral_balance);
 
@@ -286,74 +300,149 @@ public fun open_position<USDHType, CoinXType>(
     }
 }
 
+public fun close_position<USDHType, CoinXType>(
+    market: &mut Market<CoinXType>,
+    liquidity_pool: &mut LiquidityPool<USDHType>,
+    oracle: &PriceFeed<CoinXType>,
+    _clock: &Clock,
+    ctx: &mut TxContext,
+): Coin<USDHType> {
+    assert!(!market.is_paused, EMarketPaused);
+    let sender = tx_context::sender(ctx);
+    assert!(table::contains(&market.positions, sender), EPositionNotFound);
 
-// public fun close_position(
-//     market: &mut Market,
-//     position: Position,
-//     exit_price: u64,
-//     ctx: &mut TxContext,
-// ): Coin<USDH> {
-//     assert!(!market.is_paused, EMarketPaused);
+    let Position {
+        owner,
+        size,
+        collateral_amount,
+        entry_price,
+        direction,
+        open_timestamp: _,
+    } = table::remove(&mut market.positions, sender);
 
-//     let Position {
-//         id,
-//         owner,
-//         size,
-//         collateral,
-//         entry_price,
-//         direction,
-//         open_timestamp: _,
-//         market_id: _,
-//     } = position;
+    let (exit_price, _last_updated) = oracle.get_price();
+    assert!(exit_price > 0, EInvalidPrice);
 
-//     // Verify owner
-//     let sender = tx_context::sender(ctx);
-//     assert!(sender == owner, ENotPositionOwner);
+    let (pnl, is_profit) = calculate_pnl(size, entry_price, exit_price, direction);
 
-//     let position_id = object::uid_to_inner(&id);
+    let return_amount = if (is_profit) {
+        collateral_amount + pnl
+    } else {
+        if (pnl >= collateral_amount) {
+            0
+        } else {
+            collateral_amount - pnl
+        }
+    };
 
-//     // Tính PnL (simplified)
-//     let (pnl, is_profit) = calculate_pnl(size, entry_price, exit_price, direction);
+    // Ensure pool has enough liquidity to pay out
+    assert!(balance::value(&liquidity_pool.balance) >= return_amount, EInsufficientLiquidity);
 
-//     // Tính số tiền trả lại
-//     let return_amount = if (is_profit) {
-//         let profit = pnl;
-//         // let max_profit = balance::value(&market.liquidity_pool) - market.total_locked_collateral + collateral;
-//         // let actual_profit = if (profit > max_profit - collateral) { max_profit - collateral } else { profit };
-//         // collateral + actual_profit
-//         collateral + profit
-//     } else {
-//         let loss = pnl;
-//         // if (loss >= collateral) { 0 } else { collateral - loss }
-//         assert!(loss < collateral, EInsufficientLiquidity);
-//         collateral - loss
-//     };
-//     assert!(return_amount <= balance::value(&market.liquidity_pool), EInsufficientLiquidity);
+    event::emit(PositionClosed {
+        position_id: object::id_from_address(owner),
+        owner,
+        size,
+        collateral_returned: return_amount,
+        pnl,
+        is_profit,
+    });
 
-//     // Cập nhật market state
-//     market.total_positions = market.total_positions - 1;
-//     market.total_locked_collateral = market.total_locked_collateral - collateral;
+    if (return_amount > 0) {
+        let return_balance = balance::split<USDHType>(&mut liquidity_pool.balance, return_amount);
+        coin::from_balance<USDHType>(return_balance, ctx)
+    } else {
+        coin::zero<USDHType>(ctx)
+    }
+}
 
-//     // Xóa position object
-//     object::delete(id);
+public fun liquidate<USDHType, CoinXType>(
+    market: &mut Market<CoinXType>,
+    liquidity_pool: &mut LiquidityPool<USDHType>,
+    oracle: &PriceFeed<CoinXType>,
+    clock: &Clock,
+    liquidated_owner: address,
+    ctx: &mut TxContext,
+): Coin<USDHType> {
+    assert!(!market.is_paused, EMarketPaused);
+    assert!(table::contains(&market.positions, liquidated_owner), EPositionNotFound);
 
-//     event::emit(PositionClosed {
-//         position_id,
-//         owner,
-//         size,
-//         collateral_returned: return_amount,
-//         pnl,
-//         is_profit,
-//     });
-    
-//     // Trả lại tiền cho user
-//     if (return_amount > 0) {
-//         let return_balance = balance::split(&mut market.liquidity_pool, return_amount);
-//         coin::from_balance(return_balance, ctx)
-//     } else {
-//         coin::zero<USDH>(ctx)
-//     }
-// }
+    // Read-only check first (we need to borrow, but table borrow is immutable)
+    let position = table::borrow(&market.positions, liquidated_owner);
+    let size = position.size;
+    let collateral_amount = position.collateral_amount;
+    let entry_price = position.entry_price;
+    let direction = position.direction;
+
+    let (exit_price, _last_updated) = oracle.get_price();
+    assert!(exit_price > 0, EInvalidPrice);
+
+    let (pnl, is_profit) = calculate_pnl(size, entry_price, exit_price, direction);
+
+    // Check liquidation condition
+    // Liquidate if Collateral - Loss < Maintenance Margin (Size * 10%)
+    // If profit, never liquidate (unless we implement funding fees which drain collateral, but not here yet)
+    if (is_profit) {
+        abort ECannotLiquidate
+    };
+
+    // PnL is loss here
+    let loss = pnl;
+
+    // maintenance_margin = size * 10 / 100
+    let maintenance_margin = (size * MAINTENANCE_MARGIN_PCT) / 100;
+
+    // If Loss >= Collateral, it's already bankrupt.
+    // If Collateral - Loss < Maintenance, it's liquidatable.
+    // Equivalent: Collateral < Maintenance + Loss
+    if (loss < collateral_amount) {
+        let remaining_collateral = collateral_amount - loss;
+        assert!(remaining_collateral < maintenance_margin, ECannotLiquidate);
+    } else {};
+
+    // Do Liquidation
+    let Position {
+        owner,
+        size: _,
+        collateral_amount: _,
+        entry_price: _,
+        direction: _,
+        open_timestamp: _,
+    } = table::remove(&mut market.positions, liquidated_owner);
+
+    // Calculate Reward
+    // If bankrupt (loss >= collateral), remaining is 0. Liquidator gets 0. (Or we could pay small fee from pool if we want).
+    // If liquidatable but not bankrupt, remaining = collateral - loss.
+    // Reward = remaining * 10%.
+
+    let return_amount = if (loss >= collateral_amount) {
+        0
+    } else {
+        let remaining = collateral_amount - loss;
+        (remaining * LIQUIDATOR_REWARD_PCT) / 100
+    };
+
+    // Ensure pool has enough
+    assert!(balance::value(&liquidity_pool.balance) >= return_amount, EInsufficientLiquidity);
+
+    let market_id = object::uid_to_inner(&market.id);
+    event::emit(PositionLiquidated {
+        owner,
+        market_id,
+        liquidator: tx_context::sender(ctx),
+        size,
+        collateral: collateral_amount,
+        pnl: loss,
+        amount_returned_to_liquidator: return_amount,
+        timestamp: clock::timestamp_ms(clock),
+    });
+
+    if (return_amount > 0) {
+        let return_balance = balance::split<USDHType>(&mut liquidity_pool.balance, return_amount);
+        coin::from_balance<USDHType>(return_balance, ctx)
+    } else {
+        coin::zero<USDHType>(ctx)
+    }
+}
 
 // ==================== Helper Functions ====================
 
@@ -361,26 +450,27 @@ public fun open_position<USDHType, CoinXType>(
 /// Returns (pnl_amount, is_profit)
 fun calculate_pnl(size: u64, entry_price: u64, exit_price: u64, direction: u8): (u64, bool) {
     if (direction == LONG) {
-        // Long: profit khi giá tăng
+        // Long: profit triggers when exit_price > entry_price
         if (exit_price > entry_price) {
             let price_diff = exit_price - entry_price;
-            let pnl = (size * price_diff) / entry_price;
-            (pnl, true)
+            // Use u128 to avoid overflow: size * price_diff can exceed u64 max
+            let pnl = ((size as u128) * (price_diff as u128)) / (entry_price as u128);
+            ((pnl as u64), true)
         } else {
             let price_diff = entry_price - exit_price;
-            let pnl = (size * price_diff) / entry_price;
-            (pnl, false)
+            let pnl = ((size as u128) * (price_diff as u128)) / (entry_price as u128);
+            ((pnl as u64), false)
         }
     } else {
-        // Short: profit khi giá giảm
+        // Short: profit triggers when exit_price < entry_price
         if (exit_price < entry_price) {
             let price_diff = entry_price - exit_price;
-            let pnl = (size * price_diff) / entry_price;
-            (pnl, true)
+            let pnl = ((size as u128) * (price_diff as u128)) / (entry_price as u128);
+            ((pnl as u64), true)
         } else {
             let price_diff = exit_price - entry_price;
-            let pnl = (size * price_diff) / entry_price;
-            (pnl, false)
+            let pnl = ((size as u128) * (price_diff as u128)) / (entry_price as u128);
+            ((pnl as u64), false)
         }
     }
 }
@@ -388,7 +478,11 @@ fun calculate_pnl(size: u64, entry_price: u64, exit_price: u64, direction: u8): 
 // ==================== Admin Functions ====================
 
 /// Pause/Unpause Market
-public fun set_paused<USDHType> (market: &mut Market<USDHType>, _admin_cap: &AdminCap, paused: bool) {
+public fun set_paused<CoinXType>(
+    market: &mut Market<CoinXType>,
+    _admin_cap: &AdminCap,
+    paused: bool,
+) {
     market.is_paused = paused;
     event::emit(MarketPaused { paused });
 }
@@ -406,7 +500,6 @@ public fun transfer_lp_cap(lp_cap: LPCap, new_lp: address) {
 public fun is_paused<USDHType>(market: &Market<USDHType>): bool {
     market.is_paused
 }
-
 
 // ==================== Position View Functions ====================
 
@@ -445,7 +538,6 @@ public fun is_paused<USDHType>(market: &Market<USDHType>): bool {
 // public fun is_short(position: &Position): bool {
 //     position.direction == DIRECTION_SHORT
 // }
-
 
 // ==================== Test Functions ====================
 #[test_only]
@@ -526,7 +618,7 @@ fun test_open_position() {
         oracle::update_price<OCT>(
             &price_cap,
             &mut feed,
-            vector[1_000_000],
+            1_000_000,
             &clock,
             test_scenario::ctx(&mut scenario),
         );
@@ -554,7 +646,7 @@ fun test_open_position() {
         oracle::update_price<OCT>(
             &price_cap,
             &mut feed,
-            vector[2_000_000],
+            2_000_000,
             &clock,
             test_scenario::ctx(&mut scenario),
         );
@@ -624,7 +716,7 @@ fun open_position_direction_mismatch_should_fail() {
         oracle::update_price<OCT>(
             &price_cap,
             &mut feed,
-            vector[1_000_000],
+            1_000_000,
             &clock,
             test_scenario::ctx(&mut scenario),
         );
@@ -784,6 +876,464 @@ fun test_add_liquidity_when_paused() {
         test_scenario::return_shared(market);
         test_scenario::return_shared(liquidity_pool);
         test_scenario::return_to_sender(&scenario, lp_cap);
+    };
+
+    test_scenario::end(scenario);
+}
+
+#[test]
+fun test_close_position_profit() {
+    use one::test_scenario;
+    use tumo_markets::oracle;
+
+    let user = @0xAA;
+    let mut scenario = test_scenario::begin(user);
+
+    {
+        init_for_testing(test_scenario::ctx(&mut scenario));
+        oracle::mint_cap_for_testing(test_scenario::ctx(&mut scenario));
+    };
+
+    // Prepare: Add Liquidity
+    test_scenario::next_tx(&mut scenario, user);
+    {
+        let mut liquidity_pool = test_scenario::take_shared<LiquidityPool<OCT>>(&scenario);
+        let lp_cap = test_scenario::take_from_sender<LPCap>(&scenario);
+        let payment = coin::mint_for_testing<OCT>(100000, test_scenario::ctx(&mut scenario));
+        add_liquidity(&mut liquidity_pool, &lp_cap, payment, test_scenario::ctx(&mut scenario));
+
+        test_scenario::return_shared(liquidity_pool);
+        test_scenario::return_to_sender(&scenario, lp_cap);
+    };
+
+    // Prepare: Create Price Feed
+    test_scenario::next_tx(&mut scenario, user);
+    {
+        let price_cap = test_scenario::take_from_sender<oracle::PriceFeedCap>(&scenario);
+        oracle::create_price_feed<OCT>(&price_cap, test_scenario::ctx(&mut scenario));
+        test_scenario::return_to_sender(&scenario, price_cap);
+    };
+
+    // Open Position LONG at 1000
+    test_scenario::next_tx(&mut scenario, user);
+    {
+        let mut market = test_scenario::take_shared<Market<OCT>>(&scenario);
+        let mut liquidity_pool = test_scenario::take_shared<LiquidityPool<OCT>>(&scenario);
+        let clock = clock::create_for_testing(test_scenario::ctx(&mut scenario));
+        let price_cap = test_scenario::take_from_sender<oracle::PriceFeedCap>(&scenario);
+        let mut feed = test_scenario::take_shared<oracle::PriceFeed<OCT>>(&scenario);
+
+        // Price = 1000
+        oracle::update_price<OCT>(
+            &price_cap,
+            &mut feed,
+            1_000_000,
+            &clock,
+            test_scenario::ctx(&mut scenario),
+        );
+
+        let collateral = coin::mint_for_testing<OCT>(1000, test_scenario::ctx(&mut scenario));
+        open_position<OCT, OCT>(
+            &mut market,
+            &mut liquidity_pool,
+            collateral,
+            &feed,
+            5000, // 5x leverage
+            LONG,
+            &clock,
+            test_scenario::ctx(&mut scenario),
+        );
+
+        test_scenario::return_shared(market);
+        test_scenario::return_shared(liquidity_pool);
+        test_scenario::return_shared(feed);
+        test_scenario::return_to_sender(&scenario, price_cap);
+        clock::destroy_for_testing(clock);
+    };
+
+    // Close Position at 1200 (Profit)
+    test_scenario::next_tx(&mut scenario, user);
+    {
+        let mut market = test_scenario::take_shared<Market<OCT>>(&scenario);
+        let mut liquidity_pool = test_scenario::take_shared<LiquidityPool<OCT>>(&scenario);
+        let clock = clock::create_for_testing(test_scenario::ctx(&mut scenario));
+        let price_cap = test_scenario::take_from_sender<oracle::PriceFeedCap>(&scenario);
+        let mut feed = test_scenario::take_shared<oracle::PriceFeed<OCT>>(&scenario);
+
+        // Price = 1200 (20% increase)
+        oracle::update_price<OCT>(
+            &price_cap,
+            &mut feed,
+            1_200_000,
+            &clock,
+            test_scenario::ctx(&mut scenario),
+        );
+
+        // PnL calculation:
+        // entry = 1000, exit = 1200, diff = 200
+        // size = 5000
+        // pnl = 5000 * 200 / 1000 = 1000
+        // return = collateral (1000) + pnl (1000) = 2000
+
+        let returned_coin = close_position<OCT, OCT>(
+            &mut market,
+            &mut liquidity_pool,
+            &feed,
+            &clock,
+            test_scenario::ctx(&mut scenario),
+        );
+
+        assert!(coin::value(&returned_coin) == 2000, 0);
+        coin::burn_for_testing(returned_coin);
+
+        test_scenario::return_shared(market);
+        test_scenario::return_shared(liquidity_pool);
+        test_scenario::return_shared(feed);
+        test_scenario::return_to_sender(&scenario, price_cap);
+        clock::destroy_for_testing(clock);
+    };
+
+    test_scenario::end(scenario);
+}
+
+#[test]
+fun test_close_position_loss() {
+    use one::test_scenario;
+    use tumo_markets::oracle;
+
+    let user = @0xAA;
+    let mut scenario = test_scenario::begin(user);
+
+    {
+        init_for_testing(test_scenario::ctx(&mut scenario));
+        oracle::mint_cap_for_testing(test_scenario::ctx(&mut scenario));
+    };
+
+    // Add Liquidity
+    test_scenario::next_tx(&mut scenario, user);
+    {
+        let mut liquidity_pool = test_scenario::take_shared<LiquidityPool<OCT>>(&scenario);
+        let lp_cap = test_scenario::take_from_sender<LPCap>(&scenario);
+        let payment = coin::mint_for_testing<OCT>(100000, test_scenario::ctx(&mut scenario));
+        add_liquidity(&mut liquidity_pool, &lp_cap, payment, test_scenario::ctx(&mut scenario));
+        test_scenario::return_shared(liquidity_pool);
+        test_scenario::return_to_sender(&scenario, lp_cap);
+    };
+
+    // Create oracle
+    test_scenario::next_tx(&mut scenario, user);
+    {
+        let price_cap = test_scenario::take_from_sender<oracle::PriceFeedCap>(&scenario);
+        oracle::create_price_feed<OCT>(&price_cap, test_scenario::ctx(&mut scenario));
+        test_scenario::return_to_sender(&scenario, price_cap);
+    };
+
+    // Open LONG at 1000
+    test_scenario::next_tx(&mut scenario, user);
+    {
+        let mut market = test_scenario::take_shared<Market<OCT>>(&scenario);
+        let mut liquidity_pool = test_scenario::take_shared<LiquidityPool<OCT>>(&scenario);
+        let clock = clock::create_for_testing(test_scenario::ctx(&mut scenario));
+        let price_cap = test_scenario::take_from_sender<oracle::PriceFeedCap>(&scenario);
+        let mut feed = test_scenario::take_shared<oracle::PriceFeed<OCT>>(&scenario);
+
+        oracle::update_price<OCT>(
+            &price_cap,
+            &mut feed,
+            1_000_000,
+            &clock,
+            test_scenario::ctx(&mut scenario),
+        );
+
+        let collateral = coin::mint_for_testing<OCT>(1000, test_scenario::ctx(&mut scenario));
+        open_position<OCT, OCT>(
+            &mut market,
+            &mut liquidity_pool,
+            collateral,
+            &feed,
+            5000,
+            LONG,
+            &clock,
+            test_scenario::ctx(&mut scenario),
+        );
+
+        test_scenario::return_shared(market);
+        test_scenario::return_shared(liquidity_pool);
+        test_scenario::return_shared(feed);
+        test_scenario::return_to_sender(&scenario, price_cap);
+        clock::destroy_for_testing(clock);
+    };
+
+    // Close at 900 (Loss)
+    test_scenario::next_tx(&mut scenario, user);
+    {
+        let mut market = test_scenario::take_shared<Market<OCT>>(&scenario);
+        let mut liquidity_pool = test_scenario::take_shared<LiquidityPool<OCT>>(&scenario);
+        let clock = clock::create_for_testing(test_scenario::ctx(&mut scenario));
+        let price_cap = test_scenario::take_from_sender<oracle::PriceFeedCap>(&scenario);
+        let mut feed = test_scenario::take_shared<oracle::PriceFeed<OCT>>(&scenario);
+
+        // Price = 900 (-10%)
+        oracle::update_price<OCT>(
+            &price_cap,
+            &mut feed,
+            900_000,
+            &clock,
+            test_scenario::ctx(&mut scenario),
+        );
+
+        // PnL calc:
+        // diff = 100
+        // pnl = 5000 * 100 / 1000 = 500
+        // return = 1000 - 500 = 500
+
+        let returned_coin = close_position<OCT, OCT>(
+            &mut market,
+            &mut liquidity_pool,
+            &feed,
+            &clock,
+            test_scenario::ctx(&mut scenario),
+        );
+
+        assert!(coin::value(&returned_coin) == 500, 0);
+        coin::burn_for_testing(returned_coin);
+
+        test_scenario::return_shared(market);
+        test_scenario::return_shared(liquidity_pool);
+        test_scenario::return_shared(feed);
+        test_scenario::return_to_sender(&scenario, price_cap);
+        clock::destroy_for_testing(clock);
+    };
+
+    test_scenario::end(scenario);
+}
+
+#[test]
+fun test_liquidate_success() {
+    use one::test_scenario;
+    use tumo_markets::oracle;
+
+    let user = @0xAA;
+    let liquidator = @0xBB;
+    let mut scenario = test_scenario::begin(user);
+
+    {
+        init_for_testing(test_scenario::ctx(&mut scenario));
+        oracle::mint_cap_for_testing(test_scenario::ctx(&mut scenario));
+    };
+
+    // Add Liquidity
+    test_scenario::next_tx(&mut scenario, user);
+    {
+        let mut liquidity_pool = test_scenario::take_shared<LiquidityPool<OCT>>(&scenario);
+        let lp_cap = test_scenario::take_from_sender<LPCap>(&scenario);
+        let payment = coin::mint_for_testing<OCT>(100000, test_scenario::ctx(&mut scenario));
+        add_liquidity(&mut liquidity_pool, &lp_cap, payment, test_scenario::ctx(&mut scenario));
+        test_scenario::return_shared(liquidity_pool);
+        test_scenario::return_to_sender(&scenario, lp_cap);
+    };
+
+    // Create oracle
+    test_scenario::next_tx(&mut scenario, user);
+    {
+        let price_cap = test_scenario::take_from_sender<oracle::PriceFeedCap>(&scenario);
+        oracle::create_price_feed<OCT>(&price_cap, test_scenario::ctx(&mut scenario));
+        test_scenario::return_to_sender(&scenario, price_cap);
+    };
+
+    // Open LONG at 1000, Collateral 1000, Size 10000 (10x)
+    test_scenario::next_tx(&mut scenario, user);
+    {
+        let mut market = test_scenario::take_shared<Market<OCT>>(&scenario);
+        let mut liquidity_pool = test_scenario::take_shared<LiquidityPool<OCT>>(&scenario);
+        let clock = clock::create_for_testing(test_scenario::ctx(&mut scenario));
+        let price_cap = test_scenario::take_from_sender<oracle::PriceFeedCap>(&scenario);
+        let mut feed = test_scenario::take_shared<oracle::PriceFeed<OCT>>(&scenario);
+
+        oracle::update_price<OCT>(
+            &price_cap,
+            &mut feed,
+            1_000_000,
+            &clock,
+            test_scenario::ctx(&mut scenario),
+        );
+
+        let collateral = coin::mint_for_testing<OCT>(1000, test_scenario::ctx(&mut scenario));
+        open_position<OCT, OCT>(
+            &mut market,
+            &mut liquidity_pool,
+            collateral,
+            &feed,
+            10000,
+            LONG,
+            &clock,
+            test_scenario::ctx(&mut scenario),
+        );
+
+        test_scenario::return_shared(market);
+        test_scenario::return_shared(liquidity_pool);
+        test_scenario::return_shared(feed);
+        test_scenario::return_to_sender(&scenario, price_cap);
+        clock::destroy_for_testing(clock);
+    };
+
+    // Price Drops to 909 -> Liquidatable?
+    // Size = 10000. Maintenance = 10% * 10000 = 1000.
+    // Price drops 9% -> Loss = 10000 * 9% = 900.
+    // Collateral - Loss = 1000 - 900 = 100.
+    // 100 < 1000 -> Liquidatable!
+
+    // Liquidate by liquidator
+
+    // Update price as User
+    test_scenario::next_tx(&mut scenario, user);
+    {
+        let price_cap = test_scenario::take_from_sender<oracle::PriceFeedCap>(&scenario);
+        let mut feed = test_scenario::take_shared<oracle::PriceFeed<OCT>>(&scenario);
+        let clock = clock::create_for_testing(test_scenario::ctx(&mut scenario));
+
+        // Price drop 10% => 900.
+        // Loss = 1000. Collateral = 1000. Equity = 0. Bankrupt (but handled).
+        // Try 910. Loss = 900. Remaining = 100. Maintenance = 1000. 100 < 1000. Liquidatable.
+        oracle::update_price<OCT>(
+            &price_cap,
+            &mut feed,
+            910_000,
+            &clock,
+            test_scenario::ctx(&mut scenario),
+        );
+
+        test_scenario::return_shared(feed);
+        test_scenario::return_to_sender(&scenario, price_cap);
+        clock::destroy_for_testing(clock);
+    };
+
+    // Liquidate as Liquidator
+    test_scenario::next_tx(&mut scenario, liquidator);
+    {
+        let mut market = test_scenario::take_shared<Market<OCT>>(&scenario);
+        let mut liquidity_pool = test_scenario::take_shared<LiquidityPool<OCT>>(&scenario);
+        let clock = clock::create_for_testing(test_scenario::ctx(&mut scenario));
+        let feed = test_scenario::take_shared<oracle::PriceFeed<OCT>>(&scenario);
+
+        let reward = liquidate<OCT, OCT>(
+            &mut market,
+            &mut liquidity_pool,
+            &feed,
+            &clock,
+            user, // owner to liquidate
+            test_scenario::ctx(&mut scenario),
+        );
+
+        // Check reward
+        // Loss = 10000 * (1000 - 910)/1000 = 900
+        // Remaining = 1000 - 900 = 100
+        // Reward = 10% of 100 = 10
+        assert!(coin::value(&reward) == 10, 0);
+        coin::burn_for_testing(reward);
+
+        test_scenario::return_shared(market);
+        test_scenario::return_shared(liquidity_pool);
+        test_scenario::return_shared(feed);
+        clock::destroy_for_testing(clock);
+    };
+
+    test_scenario::end(scenario);
+}
+
+#[test]
+#[expected_failure(abort_code = ECannotLiquidate)]
+fun test_liquidate_fail_healthy() {
+    use one::test_scenario;
+    use tumo_markets::oracle;
+
+    let user = @0xAA;
+    let liquidator = @0xBB;
+    let mut scenario = test_scenario::begin(user);
+
+    {
+        init_for_testing(test_scenario::ctx(&mut scenario));
+        oracle::mint_cap_for_testing(test_scenario::ctx(&mut scenario));
+    };
+
+    // Add Liquidity
+    test_scenario::next_tx(&mut scenario, user);
+    {
+        let mut liquidity_pool = test_scenario::take_shared<LiquidityPool<OCT>>(&scenario);
+        let lp_cap = test_scenario::take_from_sender<LPCap>(&scenario);
+        let payment = coin::mint_for_testing<OCT>(100000, test_scenario::ctx(&mut scenario));
+        add_liquidity(&mut liquidity_pool, &lp_cap, payment, test_scenario::ctx(&mut scenario));
+        test_scenario::return_shared(liquidity_pool);
+        test_scenario::return_to_sender(&scenario, lp_cap);
+    };
+
+    // Create oracle
+    test_scenario::next_tx(&mut scenario, user);
+    {
+        let price_cap = test_scenario::take_from_sender<oracle::PriceFeedCap>(&scenario);
+        oracle::create_price_feed<OCT>(&price_cap, test_scenario::ctx(&mut scenario));
+        test_scenario::return_to_sender(&scenario, price_cap);
+    };
+
+    // Open LONG
+    test_scenario::next_tx(&mut scenario, user);
+    {
+        let mut market = test_scenario::take_shared<Market<OCT>>(&scenario);
+        let mut liquidity_pool = test_scenario::take_shared<LiquidityPool<OCT>>(&scenario);
+        let clock = clock::create_for_testing(test_scenario::ctx(&mut scenario));
+        let price_cap = test_scenario::take_from_sender<oracle::PriceFeedCap>(&scenario);
+        let mut feed = test_scenario::take_shared<oracle::PriceFeed<OCT>>(&scenario);
+
+        oracle::update_price<OCT>(
+            &price_cap,
+            &mut feed,
+            1_000_000,
+            &clock,
+            test_scenario::ctx(&mut scenario),
+        );
+
+        let collateral = coin::mint_for_testing<OCT>(1000, test_scenario::ctx(&mut scenario));
+        open_position<OCT, OCT>(
+            &mut market,
+            &mut liquidity_pool,
+            collateral,
+            &feed,
+            5000, // 5x
+            LONG,
+            &clock,
+            test_scenario::ctx(&mut scenario),
+        );
+
+        test_scenario::return_shared(market);
+        test_scenario::return_shared(liquidity_pool);
+        test_scenario::return_shared(feed);
+        test_scenario::return_to_sender(&scenario, price_cap);
+        clock::destroy_for_testing(clock);
+    };
+
+    // Liquidate immediately (Healthy)
+    test_scenario::next_tx(&mut scenario, liquidator);
+    {
+        let mut market = test_scenario::take_shared<Market<OCT>>(&scenario);
+        let mut liquidity_pool = test_scenario::take_shared<LiquidityPool<OCT>>(&scenario);
+        let clock = clock::create_for_testing(test_scenario::ctx(&mut scenario));
+        let feed = test_scenario::take_shared<oracle::PriceFeed<OCT>>(&scenario);
+
+        // Price still 1000. No loss. Healthy. Should fail.
+        let reward = liquidate<OCT, OCT>(
+            &mut market,
+            &mut liquidity_pool,
+            &feed,
+            &clock,
+            user,
+            test_scenario::ctx(&mut scenario),
+        );
+
+        coin::burn_for_testing(reward);
+        test_scenario::return_shared(market);
+        test_scenario::return_shared(liquidity_pool);
+        test_scenario::return_shared(feed);
+        clock::destroy_for_testing(clock);
     };
 
     test_scenario::end(scenario);
