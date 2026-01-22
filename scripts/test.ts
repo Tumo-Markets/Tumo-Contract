@@ -256,6 +256,23 @@ export function buildUpdatePriceTx(newPrice: bigint): Transaction {
     return tx;
 }
 
+export function buildLiquidatePositionTx(user: string): Transaction {
+    const tx = new Transaction();
+    const coin = tx.moveCall({
+        target: `${PACKAGE_ID}::tumo_markets_core::liquidate`,
+        arguments: [
+            tx.object(MARKET_OCT_ID), 
+            tx.object(LIQUIDITY_POOL_ID), 
+            tx.object(PRICE_FEED_ID),
+            tx.object("0x6"),
+            tx.pure.address(user)
+        ],
+        typeArguments: [USDH_TYPE, OCT_TYPE],
+    });
+    tx.transferObjects([coin], signer.getPublicKey().toSuiAddress());
+    return tx;
+}
+
 async function main() {
     
     let coins = await getCoinObject(USDH_TYPE);
@@ -310,26 +327,26 @@ async function main() {
     // console.log(rsUpdatePrice);
 
     /** Test OpenPosition */
-    const rsUpdatePrice1 = await client.signAndExecuteTransaction({
-        transaction: buildUpdatePriceTx(1_000_000n),
-        signer: signer,
-    });
-    const rsOpenPosition = await client.signAndExecuteTransaction({
-        transaction: buildOpenPositionTx(1, 10n**6n, 5, coins),
-        signer: signer,
-    });
-    console.log("Open Position result:");
-    console.log(rsOpenPosition);
+    // const rsUpdatePrice1 = await client.signAndExecuteTransaction({
+    //     transaction: buildUpdatePriceTx(1_000_000n),
+    //     signer: signer,
+    // });
+    // const rsOpenPosition = await client.signAndExecuteTransaction({
+    //     transaction: buildOpenPositionTx(1, 10n**6n, 5, coins),
+    //     signer: signer,
+    // });
+    // console.log("Open Position result:");
+    // console.log(rsOpenPosition);
     
     const rsUpdatePrice = await client.signAndExecuteTransaction({
-        transaction: buildUpdatePriceTx(900_000n),
+        transaction: buildUpdatePriceTx(1_100_001n),
         signer: signer,
     });
 
-    /** Lấy tất cả positions trong Market */
-    const allPositions = await getMarketPositions(MARKET_OCT_ID);
-    console.log("All Positions in Market:");
-    console.log(JSON.stringify(allPositions, null, 2));
+    // /** Lấy tất cả positions trong Market */
+    // const allPositions = await getMarketPositions(MARKET_OCT_ID);
+    // console.log("All Positions in Market:");
+    // console.log(JSON.stringify(allPositions, null, 2));
 
     /** Lấy position của user hiện tại */
     const myAddress = signer.getPublicKey().toSuiAddress();
@@ -338,13 +355,21 @@ async function main() {
     console.log(JSON.stringify(myPosition, null, 2));
 
     
-    /** Close Position */
-    const rsClosePosition = await client.signAndExecuteTransaction({
-        transaction: buildClosePosition(), // direction=0 (close), amount_collateral=0, leverage=1
+    // /** Close Position */
+    // const rsClosePosition = await client.signAndExecuteTransaction({
+    //     transaction: buildClosePosition(), // direction=0 (close), amount_collateral=0, leverage=1
+    //     signer: signer,
+    // });
+    // console.log("Close Position result:");
+    // console.log(rsClosePosition);
+
+    /** Liquidate */
+    const rsLiquidate = await client.signAndExecuteTransaction({
+        transaction: buildLiquidatePositionTx(signer.getPublicKey().toSuiAddress()), // direction=1 (long)
         signer: signer,
     });
-    console.log("Close Position result:");
-    console.log(rsClosePosition);
+    console.log("Liquidate Position result:");
+    console.log(rsLiquidate);
 }
 
 main();
