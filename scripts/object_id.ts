@@ -1,0 +1,10 @@
+export const PACKAGE_ID = "0xd03f8069c465ada074e250b92d7baac446709a7fce85449912ce3e207347b592"; // package tumo_markets đã publish
+export const ADMIN_CAP_ID = "0x0fb24e51462024a18fd7adfc12427aa0fa106d4835eb95a520eeb8579b26f91a"; // AdminCap object id
+export const LP_CAP_ID = "0x23185b3cebb4e0db9fd06c6ed3522df1c9ce1d9080405f7c1bc340d2a40dc2d7"; // LPCap object id
+export const OCT_TYPE = "0x0000000000000000000000000000000000000000000000000000000000000002::oct::OCT"; 
+// export const USDH_TYPE = '0x2::coin_registry::Currency<0xdb178dd88808ca0718c6c9f19f7783a210f110abd05f72b76dde6e2e15bd86b2::usdh::USDH>'
+export const USDH_TYPE = "0xdd0d096ded419429ca4cbe948aa01cedfc842eb151eb6a73af0398406a8cfb07::usdh::USDH";
+export const LIQUIDITY_POOL_ID = "0xb3895285c068b085f057044eae023d8beca8592b6426f3186d23911e35ab6ec5";
+export const MARKET_OCT_ID = "0x7dd2aa4abc0f940981b9114c323678da9917c894d9d0f1a88e422f58717ca927";
+export const PRICE_FEED_CAP_ID = "0xe1354c69772d5c1bbc9d194b8e5a1c275d87d420295810b06050b3d50b086602";
+export const PRICE_FEED_ID = "0x160af47fc46e4541383ac21b08109bbd4b84ed370c13a1269863d6e6bfd7775e";
