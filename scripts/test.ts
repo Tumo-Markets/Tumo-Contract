@@ -6,7 +6,7 @@ import { sign } from "node:crypto";
 /**
  * Điền các giá trị thực tế trước khi chạy
  */
-import { ADMIN_CAP_ID, LP_CAP_ID, OCT_TYPE, PACKAGE_ID, USDH_TYPE, LIQUIDITY_POOL_ID, MARKET_OCT_ID, PRICE_FEED_CAP_ID , PRICE_FEED_ID} from "./object_id";
+import { ADMIN_CAP_ID, LP_CAP_ID, OCT_TYPE, PACKAGE_ID, USDH_TYPE, LIQUIDITY_POOL_ID, MARKET_OCT_ID, PRICE_FEED_CAP_ID , BTC_TYPE, PRICE_FEED_BTC_ID, MARKET_BTC_ID} from "./object_id";
 import { get } from "node:http";
 
 
@@ -24,9 +24,9 @@ export function getCoinObject(coinType: string): Promise<PaginatedCoins> {
     });
     return coins;
 }
-export function getMarketObjData(marketId: string): Promise<SuiObjectResponse> {
+export function getObjData(objectId: string): Promise<SuiObjectResponse> {
     const objInfo = client.getObject({
-        id: marketId,
+        id: objectId,
         options: { showDisplay: true, showType: true, showContent: true },
     });
     return objInfo;
@@ -163,12 +163,22 @@ export function buildCreateLiquidityPoolTx(CoinType: string): Transaction {
     return tx;
 }
 
-export function buildCreateMarketTx(CoinType: string): Transaction {
+export function buildCreateMarketTx(CoinType: string, leverage: number): Transaction {
     const tx = new Transaction();
     tx.moveCall({
         target: `${PACKAGE_ID}::tumo_markets_core::create_market`,
-        arguments: [tx.object(ADMIN_CAP_ID), tx.pure.u8(5)],
+        arguments: [tx.object(ADMIN_CAP_ID), tx.pure.u8(leverage)],
         typeArguments: [CoinType],
+    });
+    return tx;
+}
+
+export function buildEditMarketLeverageTx(marketId: string, newLeverage: number): Transaction {
+    const tx = new Transaction();
+    tx.moveCall({
+        target: `${PACKAGE_ID}::tumo_markets_core::edit_market_leverage`,
+        arguments: [tx.object(marketId), tx.object(ADMIN_CAP_ID), tx.pure.u8(newLeverage)],
+        typeArguments: [BTC_TYPE],
     });
     return tx;
 }
@@ -200,58 +210,70 @@ export function buildOpenPositionTx(direction: number, amount_collateral: bigint
     tx.moveCall({
         target: `${PACKAGE_ID}::tumo_markets_core::open_position`,
         arguments: [
-            tx.object(MARKET_OCT_ID), 
+            tx.object(MARKET_BTC_ID), 
             tx.object(LIQUIDITY_POOL_ID), 
             paymentCollateral, 
-            tx.object(PRICE_FEED_ID),
+            tx.object(PRICE_FEED_BTC_ID),
             tx.pure.u64(size), // is_long
             tx.pure.u8(direction), // margin
             tx.object("0x6")
         ],
-        typeArguments: [USDH_TYPE, OCT_TYPE],
+        typeArguments: [USDH_TYPE, BTC_TYPE],
     });
     return tx;
 }
 
-export function buildClosePosition(): Transaction {
+export function buildClosePosition(marketId: string, marketType: string): Transaction {
     const tx = new Transaction();
     
     const coin = tx.moveCall({
         target: `${PACKAGE_ID}::tumo_markets_core::close_position`,
         arguments: [
-            tx.object(MARKET_OCT_ID), 
+            tx.object(marketId), 
             tx.object(LIQUIDITY_POOL_ID), 
-            tx.object(PRICE_FEED_ID),
+            tx.object(PRICE_FEED_BTC_ID),
             tx.object("0x6")
         ],
-        typeArguments: [USDH_TYPE, OCT_TYPE],
+        typeArguments: [USDH_TYPE, marketType],
     });
     tx.transferObjects([coin], signer.getPublicKey().toSuiAddress());
     return tx;
 }
 
-export function buildCreatePriceFeedTx(): Transaction {
+export function buildCreatePriceFeedTx(typeMarket: string): Transaction {
     const tx = new Transaction();
     tx.moveCall({
         target: `${PACKAGE_ID}::oracle::create_price_feed`,
         arguments: [tx.object(PRICE_FEED_CAP_ID)],
-        typeArguments: [OCT_TYPE],
+        typeArguments: [typeMarket],
     })
     return tx;
 }
 
 // Cập nhật giá cho PriceFeed (cần gọi trước khi open_position)
-export function buildUpdatePriceTx(newPrice: bigint): Transaction {
+export function buildUpdatePriceTx(newPrice: bigint, typeMarket: string, priceFeedId: string): Transaction {
     const tx = new Transaction();
     tx.moveCall({
         target: `${PACKAGE_ID}::oracle::update_price`,
         arguments: [
             tx.object(PRICE_FEED_CAP_ID),
-            tx.object(PRICE_FEED_ID),
+            tx.object(priceFeedId),
             tx.pure.u64(newPrice),
             tx.object("0x6"), // Clock
         ],
-        typeArguments: [OCT_TYPE],
+        typeArguments: [typeMarket],
+    });
+    return tx;
+}
+
+export function buidTransferPriceFeedCapTx(toAddress: string): Transaction {
+    const tx = new Transaction();
+    tx.moveCall({
+        target: `${PACKAGE_ID}::oracle::transfer_price_feed_cap`,
+        arguments: [
+            tx.object(PRICE_FEED_CAP_ID),
+            tx.pure.address(toAddress),
+        ],
     });
     return tx;
 }
@@ -263,7 +285,7 @@ export function buildLiquidatePositionTx(user: string): Transaction {
         arguments: [
             tx.object(MARKET_OCT_ID), 
             tx.object(LIQUIDITY_POOL_ID), 
-            tx.object(PRICE_FEED_ID),
+            tx.object(PRICE_FEED_BTC_ID),
             tx.object("0x6"),
             tx.pure.address(user)
         ],
@@ -274,6 +296,13 @@ export function buildLiquidatePositionTx(user: string): Transaction {
 }
 
 async function main() {
+
+    const rsTransferPriceFeedCap = await client.signAndExecuteTransaction({
+        transaction: buidTransferPriceFeedCapTx('0x71b2250b548a6a62c40e52bab8104a8e5050292cd47b9056ed6c94f3aceb81e7'),
+        signer: signer,
+    });
+    console.log("Transfer Price Feed Cap result:");
+    console.log(rsTransferPriceFeedCap);
     
     let coins = await getCoinObject(USDH_TYPE);
 
@@ -287,7 +316,7 @@ async function main() {
 
     /** Test CreateMarket */
     // const rsCreateMarket = await client.signAndExecuteTransaction({
-    //   transaction: buildCreateMarketTx(OCT_TYPE),
+    //   transaction: buildCreateMarketTx(BTC_TYPE),
     //   signer: signer,
     // });
     // console.log("Create Market result:");
@@ -295,7 +324,7 @@ async function main() {
 
     /** Test AddLiquidity */
     // const rsAddLiquidity = await client.signAndExecuteTransaction({
-    //     transaction: buildAddLiquidityTx(LIQUIDITY_POOL_ID, coins, 10n**9n),
+    //     transaction: buildAddLiquidityTx(LIQUIDITY_POOL_ID, coins, 10n**15n),
     //     signer: signer,
     // });
     // console.log("Add Liquidity result:");
@@ -311,7 +340,7 @@ async function main() {
 
     /**Create Price Feed */
     // const rsCreatePriceFeed = await client.signAndExecuteTransaction({
-    //     transaction: buildCreatePriceFeedTx(),
+    //     transaction: buildCreatePriceFeedTx(BTC_TYPE),
     //     signer: signer,
     // });
     // console.log("Create Price Feed result:");
@@ -320,17 +349,13 @@ async function main() {
     /** Update Price - CẦN GỌI TRƯỚC KHI OPEN POSITION */
     // Giá = 1_000_000 (1 USD với 6 decimals)
     // const rsUpdatePrice = await client.signAndExecuteTransaction({
-    //     transaction: buildUpdatePriceTx(1_000_000n),
+    //     transaction: buildUpdatePriceTx(1_000_000n, BTC_TYPE, PRICE_FEED_BTC_ID),
     //     signer: signer,
     // });
     // console.log("Update Price result:");
     // console.log(rsUpdatePrice);
 
     /** Test OpenPosition */
-    // const rsUpdatePrice1 = await client.signAndExecuteTransaction({
-    //     transaction: buildUpdatePriceTx(1_000_000n),
-    //     signer: signer,
-    // });
     // const rsOpenPosition = await client.signAndExecuteTransaction({
     //     transaction: buildOpenPositionTx(1, 10n**6n, 5, coins),
     //     signer: signer,
@@ -338,38 +363,51 @@ async function main() {
     // console.log("Open Position result:");
     // console.log(rsOpenPosition);
     
-    const rsUpdatePrice = await client.signAndExecuteTransaction({
-        transaction: buildUpdatePriceTx(1_100_001n),
-        signer: signer,
-    });
+    // const rsUpdatePrice = await client.signAndExecuteTransaction({
+    //     transaction: buildUpdatePriceTx(1_100_001n),
+    //     signer: signer,
+    // });
 
     // /** Lấy tất cả positions trong Market */
-    // const allPositions = await getMarketPositions(MARKET_OCT_ID);
+    // const allPositions = await getMarketPositions(MARKET_BTC_ID);
     // console.log("All Positions in Market:");
     // console.log(JSON.stringify(allPositions, null, 2));
 
+    // const priceFeedData = await getObjData(PRICE_FEED_BTC_ID);
+    // console.log("Price Feed Data:");
+    // console.log(JSON.stringify(priceFeedData, null, 2));
+
+
     /** Lấy position của user hiện tại */
-    const myAddress = signer.getPublicKey().toSuiAddress();
-    const myPosition = await getUserPosition(MARKET_OCT_ID, myAddress);
-    console.log(`\nMy Position (${myAddress}):`);
-    console.log(JSON.stringify(myPosition, null, 2));
+    // const myAddress = signer.getPublicKey().toSuiAddress();
+    // const myPosition = await getUserPosition(MARKET_OCT_ID, myAddress);
+    // console.log(`\nMy Position (${myAddress}):`);
+    // console.log(JSON.stringify(myPosition, null, 2));
 
     
     // /** Close Position */
     // const rsClosePosition = await client.signAndExecuteTransaction({
-    //     transaction: buildClosePosition(), // direction=0 (close), amount_collateral=0, leverage=1
+    //     transaction: buildClosePosition(MARKET_BTC_ID, BTC_TYPE), // direction=0 (close), amount_collateral=0, leverage=1
     //     signer: signer,
     // });
     // console.log("Close Position result:");
     // console.log(rsClosePosition);
 
-    /** Liquidate */
-    const rsLiquidate = await client.signAndExecuteTransaction({
-        transaction: buildLiquidatePositionTx(signer.getPublicKey().toSuiAddress()), // direction=1 (long)
+    // Edit Market Leverage
+    const rsEditMarketLeverage = await client.signAndExecuteTransaction({
+        transaction: buildEditMarketLeverageTx(MARKET_BTC_ID, 100),
         signer: signer,
     });
-    console.log("Liquidate Position result:");
-    console.log(rsLiquidate);
+    console.log("Edit Market Leverage result:");
+    console.log(rsEditMarketLeverage);
+
+    /** Liquidate */
+    // const rsLiquidate = await client.signAndExecuteTransaction({
+    //     transaction: buildLiquidatePositionTx(signer.getPublicKey().toSuiAddress()), // direction=1 (long)
+    //     signer: signer,
+    // });
+    // console.log("Liquidate Position result:");
+    // console.log(rsLiquidate);
 }
 
 main();

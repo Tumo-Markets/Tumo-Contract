@@ -92,6 +92,13 @@ public fun get_price<CoinXType>(feed: &PriceFeed<CoinXType>): (u64, u64) {
     (feed.price, feed.last_updated)
 }
 
+public fun transfer_price_feed_cap(
+    cap: PriceFeedCap,
+    to: address,
+) {
+    transfer::transfer(cap, to);
+}
+
 #[test]
 fun test_create_price_feed() {
     use one::test_scenario;
@@ -249,6 +256,7 @@ fun test_update_fail_stale() {
     };
     test_scenario::end(scenario);
 }
+
 
 // Minimal dummy coin for internal testing if needed, keeping it simple.
 // In reality we imported OCT? Wait, OCT is not defined in oracle.

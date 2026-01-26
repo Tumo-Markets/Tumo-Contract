@@ -27,10 +27,7 @@ const ECannotLiquidate: u64 = 10;
 // ==================== Constants ====================
 const LONG: u8 = 0;
 const SHORT: u8 = 1;
-// 10% maintenance margin
-const MAINTENANCE_MARGIN_PCT: u64 = 10;
-// Liquidator gets 10% of remaining collateral
-const LIQUIDATOR_REWARD_PCT: u64 = 10;
+
 
 public struct LiquidityPool<phantom USDHType> has key {
     id: UID,
@@ -88,6 +85,7 @@ public struct LiquidityRemoved has copy, drop {
 
 public struct PositionOpened has copy, drop {
     owner: address,
+    market_id: ID,
     size: u64,
     collateral: u64,
     entry_price: u64,
@@ -97,6 +95,7 @@ public struct PositionOpened has copy, drop {
 
 public struct PositionUpdated has copy, drop {
     owner: address,
+    market_id: ID,
     new_size: u64,
     new_collateral: u64,
     new_entry_price: u64,
@@ -105,8 +104,8 @@ public struct PositionUpdated has copy, drop {
 }
 
 public struct PositionClosed has copy, drop {
-    position_id: ID,
     owner: address,
+    market_id: ID,
     size: u64,
     collateral_returned: u64,
     pnl: u64,
@@ -243,6 +242,7 @@ public fun open_position<USDHType, CoinXType>(
     balance::join(&mut liquidity_pool.balance, collateral_balance);
 
     let timestamp = clock::timestamp_ms(clock);
+    let market_id = object::uid_to_inner(&market.id);
 
     if (!table::contains(&market.positions, owner)) {
         assert!(payment_collateral > 0, EInvalidCollateral);
@@ -259,6 +259,7 @@ public fun open_position<USDHType, CoinXType>(
 
         event::emit(PositionOpened {
             owner,
+            market_id,
             size,
             collateral: payment_collateral,
             entry_price,
@@ -291,6 +292,7 @@ public fun open_position<USDHType, CoinXType>(
 
         event::emit(PositionUpdated {
             owner,
+            market_id,
             new_size,
             new_collateral,
             new_entry_price,
@@ -339,8 +341,8 @@ public fun close_position<USDHType, CoinXType>(
     assert!(balance::value(&liquidity_pool.balance) >= return_amount, EInsufficientLiquidity);
 
     event::emit(PositionClosed {
-        position_id: object::id_from_address(owner),
         owner,
+        market_id: object::uid_to_inner(&market.id),
         size,
         collateral_returned: return_amount,
         pnl,
@@ -389,7 +391,8 @@ public fun liquidate<USDHType, CoinXType>(
     let loss = pnl;
 
     // maintenance_margin = size * 10 / 100
-    let maintenance_margin = (size * MAINTENANCE_MARGIN_PCT) / 100;
+    let maintenance_margin_pct = (100/market.leverage) as u64;
+    let maintenance_margin = (size * maintenance_margin_pct) / 100;
 
     // If Loss >= Collateral, it's already bankrupt.
     // If Collateral - Loss < Maintenance, it's liquidatable.
@@ -418,7 +421,7 @@ public fun liquidate<USDHType, CoinXType>(
         0
     } else {
         let remaining = collateral_amount - loss;
-        (remaining * LIQUIDATOR_REWARD_PCT) / 100
+        remaining
     };
 
     // Ensure pool has enough
@@ -442,6 +445,14 @@ public fun liquidate<USDHType, CoinXType>(
     } else {
         coin::zero<USDHType>(ctx)
     }
+}
+
+public fun edit_market_leverage<CoinXType>(
+    market: &mut Market<CoinXType>,
+    _admin_cap: &AdminCap,
+    new_leverage: u8,
+) {
+    market.leverage = new_leverage;
 }
 
 // ==================== Helper Functions ====================
