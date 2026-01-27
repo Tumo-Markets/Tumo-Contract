@@ -47,6 +47,7 @@ public struct Market<phantom CoinXType> has key {
 /// Đối tượng đại diện cho vị thế của User
 /// Mỗi Position là một "Ticket" riêng biệt
 public struct Position<phantom CoinXType> has store {
+    id: UID,
     owner: address,
     size: u64,
     collateral_amount: u64,
@@ -84,6 +85,7 @@ public struct LiquidityRemoved has copy, drop {
 }
 
 public struct PositionOpened has copy, drop {
+    position_id: ID,
     owner: address,
     market_id: ID,
     size: u64,
@@ -94,6 +96,7 @@ public struct PositionOpened has copy, drop {
 }
 
 public struct PositionUpdated has copy, drop {
+    position_id: ID,
     owner: address,
     market_id: ID,
     new_size: u64,
@@ -104,12 +107,14 @@ public struct PositionUpdated has copy, drop {
 }
 
 public struct PositionClosed has copy, drop {
+    position_id: ID,
     owner: address,
     market_id: ID,
     size: u64,
     collateral_returned: u64,
     pnl: u64,
     is_profit: bool,
+    close_price: u64,
 }
 
 public struct MarketPaused has copy, drop {
@@ -117,6 +122,7 @@ public struct MarketPaused has copy, drop {
 }
 
 public struct PositionLiquidated has copy, drop {
+    position_id: ID,
     owner: address,
     market_id: ID,
     liquidator: address,
@@ -249,6 +255,7 @@ public fun open_position<USDHType, CoinXType>(
         // Check min collateral based on leverage
         assert!(payment_collateral * (market.leverage as u64) >= size, EInvalidSize);
         let position = Position<CoinXType> {
+            id: object::new(ctx),
             owner,
             size,
             collateral_amount: payment_collateral,
@@ -257,7 +264,10 @@ public fun open_position<USDHType, CoinXType>(
             open_timestamp: timestamp,
         };
 
+        let position_id = object::id(&position);
+
         event::emit(PositionOpened {
+            position_id,
             owner,
             market_id,
             size,
@@ -290,7 +300,10 @@ public fun open_position<USDHType, CoinXType>(
         position.entry_price = new_entry_price;
         // keep original open_timestamp (position.open_timestamp) to represent first open time
 
+        let position_id = object::uid_to_inner(&position.id);
+
         event::emit(PositionUpdated {
+            position_id,
             owner,
             market_id,
             new_size,
@@ -314,6 +327,7 @@ public fun close_position<USDHType, CoinXType>(
     assert!(table::contains(&market.positions, sender), EPositionNotFound);
 
     let Position {
+        id,
         owner,
         size,
         collateral_amount,
@@ -321,6 +335,9 @@ public fun close_position<USDHType, CoinXType>(
         direction,
         open_timestamp: _,
     } = table::remove(&mut market.positions, sender);
+
+    let position_id = object::uid_to_inner(&id);
+    object::delete(id);
 
     let (exit_price, _last_updated) = oracle.get_price();
     assert!(exit_price > 0, EInvalidPrice);
@@ -341,12 +358,14 @@ public fun close_position<USDHType, CoinXType>(
     assert!(balance::value(&liquidity_pool.balance) >= return_amount, EInsufficientLiquidity);
 
     event::emit(PositionClosed {
+        position_id,
         owner,
         market_id: object::uid_to_inner(&market.id),
         size,
         collateral_returned: return_amount,
         pnl,
         is_profit,
+        close_price: exit_price,
     });
 
     if (return_amount > 0) {
@@ -404,6 +423,7 @@ public fun liquidate<USDHType, CoinXType>(
 
     // Do Liquidation
     let Position {
+        id,
         owner,
         size: _,
         collateral_amount: _,
@@ -411,6 +431,9 @@ public fun liquidate<USDHType, CoinXType>(
         direction: _,
         open_timestamp: _,
     } = table::remove(&mut market.positions, liquidated_owner);
+
+    let position_id = object::uid_to_inner(&id);
+    object::delete(id);
 
     // Calculate Reward
     // If bankrupt (loss >= collateral), remaining is 0. Liquidator gets 0. (Or we could pay small fee from pool if we want).
@@ -429,6 +452,7 @@ public fun liquidate<USDHType, CoinXType>(
 
     let market_id = object::uid_to_inner(&market.id);
     event::emit(PositionLiquidated {
+        position_id,
         owner,
         market_id,
         liquidator: tx_context::sender(ctx),
