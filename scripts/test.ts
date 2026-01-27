@@ -6,7 +6,7 @@ import { sign } from "node:crypto";
 /**
  * Điền các giá trị thực tế trước khi chạy
  */
-import { ADMIN_CAP_ID, LP_CAP_ID, OCT_TYPE, PACKAGE_ID, USDH_TYPE, LIQUIDITY_POOL_ID, MARKET_OCT_ID, PRICE_FEED_CAP_ID , BTC_TYPE, PRICE_FEED_BTC_ID, MARKET_BTC_ID} from "./object_id";
+import { ADMIN_CAP_ID, LP_CAP_ID, OCT_TYPE, PACKAGE_ID, USDH_TYPE, LIQUIDITY_POOL_ID, PRICE_FEED_CAP_ID , BTC_TYPE, PRICE_FEED_BTC_ID, MARKET_BTC_ID} from "./object_id";
 import { get } from "node:http";
 
 
@@ -283,13 +283,13 @@ export function buildLiquidatePositionTx(user: string): Transaction {
     const coin = tx.moveCall({
         target: `${PACKAGE_ID}::tumo_markets_core::liquidate`,
         arguments: [
-            tx.object(MARKET_OCT_ID), 
+            tx.object(MARKET_BTC_ID), 
             tx.object(LIQUIDITY_POOL_ID), 
             tx.object(PRICE_FEED_BTC_ID),
             tx.object("0x6"),
             tx.pure.address(user)
         ],
-        typeArguments: [USDH_TYPE, OCT_TYPE],
+        typeArguments: [USDH_TYPE, BTC_TYPE],
     });
     tx.transferObjects([coin], signer.getPublicKey().toSuiAddress());
     return tx;
@@ -297,15 +297,15 @@ export function buildLiquidatePositionTx(user: string): Transaction {
 
 async function main() {
 
-    const rsTransferPriceFeedCap = await client.signAndExecuteTransaction({
-        transaction: buidTransferPriceFeedCapTx('0x71b2250b548a6a62c40e52bab8104a8e5050292cd47b9056ed6c94f3aceb81e7'),
-        signer: signer,
-    });
-    console.log("Transfer Price Feed Cap result:");
-    console.log(rsTransferPriceFeedCap);
-    
-    let coins = await getCoinObject(USDH_TYPE);
+    // const rsTransferPriceFeedCap = await client.signAndExecuteTransaction({
+    //     transaction: buidTransferPriceFeedCapTx('0x71b2250b548a6a62c40e52bab8104a8e5050292cd47b9056ed6c94f3aceb81e7'),
+    //     signer: signer,
+    // });
+    // console.log("Transfer Price Feed Cap result:");
+    // console.log(rsTransferPriceFeedCap);
 
+
+    let coins = await getCoinObject(USDH_TYPE);
     /** Test CreateLiquidityPool */
     // const rsCreateLiquidityPool = await client.signAndExecuteTransaction({
     //   transaction: buildCreateLiquidityPoolTx(USDH_TYPE),
@@ -316,7 +316,7 @@ async function main() {
 
     /** Test CreateMarket */
     // const rsCreateMarket = await client.signAndExecuteTransaction({
-    //   transaction: buildCreateMarketTx(BTC_TYPE),
+    //   transaction: buildCreateMarketTx(BTC_TYPE, 100),
     //   signer: signer,
     // });
     // console.log("Create Market result:");
@@ -364,7 +364,7 @@ async function main() {
     // console.log(rsOpenPosition);
     
     // const rsUpdatePrice = await client.signAndExecuteTransaction({
-    //     transaction: buildUpdatePriceTx(1_100_001n),
+    //     transaction: buildUpdatePriceTx(1_500_000n, BTC_TYPE, PRICE_FEED_BTC_ID),
     //     signer: signer,
     // });
 
@@ -394,20 +394,20 @@ async function main() {
     // console.log(rsClosePosition);
 
     // Edit Market Leverage
-    const rsEditMarketLeverage = await client.signAndExecuteTransaction({
-        transaction: buildEditMarketLeverageTx(MARKET_BTC_ID, 100),
-        signer: signer,
-    });
-    console.log("Edit Market Leverage result:");
-    console.log(rsEditMarketLeverage);
-
-    /** Liquidate */
-    // const rsLiquidate = await client.signAndExecuteTransaction({
-    //     transaction: buildLiquidatePositionTx(signer.getPublicKey().toSuiAddress()), // direction=1 (long)
+    // const rsEditMarketLeverage = await client.signAndExecuteTransaction({
+    //     transaction: buildEditMarketLeverageTx(MARKET_BTC_ID, 100),
     //     signer: signer,
     // });
-    // console.log("Liquidate Position result:");
-    // console.log(rsLiquidate);
+    // console.log("Edit Market Leverage result:");
+    // console.log(rsEditMarketLeverage);
+
+    /** Liquidate */
+    const rsLiquidate = await client.signAndExecuteTransaction({
+        transaction: buildLiquidatePositionTx(signer.getPublicKey().toSuiAddress()), // direction=1 (long)
+        signer: signer,
+    });
+    console.log("Liquidate Position result:");
+    console.log(rsLiquidate);
 }
 
 main();

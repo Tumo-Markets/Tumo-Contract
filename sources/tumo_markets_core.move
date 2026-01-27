@@ -47,7 +47,7 @@ public struct Market<phantom CoinXType> has key {
 /// Đối tượng đại diện cho vị thế của User
 /// Mỗi Position là một "Ticket" riêng biệt
 public struct Position<phantom CoinXType> has store {
-    id: UID,
+    id: ID,
     owner: address,
     size: u64,
     collateral_amount: u64,
@@ -255,7 +255,7 @@ public fun open_position<USDHType, CoinXType>(
         // Check min collateral based on leverage
         assert!(payment_collateral * (market.leverage as u64) >= size, EInvalidSize);
         let position = Position<CoinXType> {
-            id: object::new(ctx),
+            id: object::id_from_address(tx_context::fresh_object_address(ctx)),
             owner,
             size,
             collateral_amount: payment_collateral,
@@ -264,7 +264,7 @@ public fun open_position<USDHType, CoinXType>(
             open_timestamp: timestamp,
         };
 
-        let position_id = object::uid_to_inner(&position.id);
+        let position_id = position.id;
 
         event::emit(PositionOpened {
             position_id,
@@ -300,7 +300,7 @@ public fun open_position<USDHType, CoinXType>(
         position.entry_price = new_entry_price;
         // keep original open_timestamp (position.open_timestamp) to represent first open time
 
-        let position_id = object::uid_to_inner(&position.id);
+        let position_id = position.id;
 
         event::emit(PositionUpdated {
             position_id,
@@ -336,8 +336,7 @@ public fun close_position<USDHType, CoinXType>(
         open_timestamp: _,
     } = table::remove(&mut market.positions, sender);
 
-    let position_id = object::uid_to_inner(&id);
-    object::delete(id);
+    let position_id = id;
 
     let (exit_price, _last_updated) = oracle.get_price();
     assert!(exit_price > 0, EInvalidPrice);
@@ -432,8 +431,7 @@ public fun liquidate<USDHType, CoinXType>(
         open_timestamp: _,
     } = table::remove(&mut market.positions, liquidated_owner);
 
-    let position_id = object::uid_to_inner(&id);
-    object::delete(id);
+    let position_id = id;
 
     // Calculate Reward
     // If bankrupt (loss >= collateral), remaining is 0. Liquidator gets 0. (Or we could pay small fee from pool if we want).
