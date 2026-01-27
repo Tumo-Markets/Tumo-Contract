@@ -264,7 +264,7 @@ public fun open_position<USDHType, CoinXType>(
             open_timestamp: timestamp,
         };
 
-        let position_id = object::id(&position);
+        let position_id = object::uid_to_inner(&position.id);
 
         event::emit(PositionOpened {
             position_id,
