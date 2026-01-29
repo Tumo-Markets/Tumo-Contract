@@ -6,9 +6,21 @@ import { sign } from "node:crypto";
 /**
  * Điền các giá trị thực tế trước khi chạy
  */
-import { ADMIN_CAP_ID, LP_CAP_ID, OCT_TYPE, PACKAGE_ID, USDH_TYPE, LIQUIDITY_POOL_ID, PRICE_FEED_CAP_ID , BTC_TYPE, PRICE_FEED_BTC_ID, MARKET_BTC_ID} from "./object_id";
+import {
+    ADMIN_CAP_ID,
+    LP_CAP_ID,
+    OCT_TYPE,
+    PACKAGE_ID,
+    USDH_TYPE,
+    LIQUIDITY_POOL_USDH_ID,
+    PRICE_FEED_CAP_ID,
+    BTC_TYPE,
+    PRICE_FEED_BTC_ID,
+    MARKET_BTC_ID,
+    HACKTHON_TYPE,
+    LIQUIDITY_POOL_HACKTHON_ID,
+} from "./object_id";
 import { get } from "node:http";
-
 
 export const client = new SuiClient({
     url: getFullnodeUrl("testnet"),
@@ -70,7 +82,7 @@ export async function getMarketPositions(marketId: string) {
                 owner: field.name.value, // address của owner
                 position: (positionObj.data?.content as any)?.fields?.value?.fields,
             };
-        })
+        }),
     );
 
     return positions;
@@ -104,7 +116,7 @@ export async function getUserPosition(marketId: string, userAddress: string) {
     }
 }
 
-export function buildAddLiquidityTx(liquidity_pool: string, allCoins: PaginatedCoins, amount: bigint): Transaction {
+export function buildAddLiquidityTx(liquidity_pool: string, allCoins: PaginatedCoins, amount: bigint, liquidityType: string): Transaction {
     const coinsToMerge = allCoins.data;
     const tx = new Transaction();
 
@@ -126,14 +138,12 @@ export function buildAddLiquidityTx(liquidity_pool: string, allCoins: PaginatedC
         );
     }
 
-
-
     const [paymentCoinId, _] = tx.splitCoins(coinsToMerge[0].coinObjectId, [amount]);
 
     tx.moveCall({
         target: `${PACKAGE_ID}::tumo_markets_core::add_liquidity`,
         arguments: [tx.object(liquidity_pool), tx.object(LP_CAP_ID), paymentCoinId],
-        typeArguments: [USDH_TYPE],
+        typeArguments: [liquidityType],
     });
     return tx;
 }
@@ -141,12 +151,12 @@ export function buildAddLiquidityTx(liquidity_pool: string, allCoins: PaginatedC
 // /**
 //  * Remove liquidity: trả về Coin<OCT>
 //  */
-export function buildRemoveLiquidityTx(amount: bigint): Transaction {
+export function buildRemoveLiquidityTx(amount: bigint, liquidityType: string): Transaction {
     const tx = new Transaction();
     const coin = tx.moveCall({
         target: `${PACKAGE_ID}::tumo_markets_core::remove_liquidity`,
-        arguments: [tx.object(LIQUIDITY_POOL_ID), tx.object(LP_CAP_ID), tx.pure.u64(amount)],
-        typeArguments: [USDH_TYPE],
+        arguments: [tx.object(LIQUIDITY_POOL_USDH_ID), tx.object(LP_CAP_ID), tx.pure.u64(amount)],
+        typeArguments: [liquidityType],
     });
 
     tx.transferObjects([coin], signer.getPublicKey().toSuiAddress());
@@ -183,7 +193,17 @@ export function buildEditMarketLeverageTx(marketId: string, newLeverage: number)
     return tx;
 }
 
-export function buildOpenPositionTx(direction: number, amount_collateral: bigint, leverage: number, allCoins: PaginatedCoins): Transaction {
+export function buildOpenPositionTx(
+    liquidityType: string,
+    coinTradeType: string,
+    liquidityPoolId: string,
+    marketCoinTradeId: string,
+    priceFeedCoinTradeId: string,
+    direction: number,
+    amount_collateral: bigint,
+    leverage: number,
+    allCoins: PaginatedCoins,
+): Transaction {
     const tx = new Transaction();
     let coinsToMerge = allCoins.data;
     let size = amount_collateral * BigInt(leverage);
@@ -206,35 +226,36 @@ export function buildOpenPositionTx(direction: number, amount_collateral: bigint
         );
     }
     let [paymentCollateral, _] = tx.splitCoins(coinsToMerge[0].coinObjectId, [amount_collateral]);
-    
+
     tx.moveCall({
         target: `${PACKAGE_ID}::tumo_markets_core::open_position`,
         arguments: [
-            tx.object(MARKET_BTC_ID), 
-            tx.object(LIQUIDITY_POOL_ID), 
-            paymentCollateral, 
-            tx.object(PRICE_FEED_BTC_ID),
+            tx.object(marketCoinTradeId),
+            tx.object(liquidityPoolId),
+            paymentCollateral,
+            tx.object(priceFeedCoinTradeId),
             tx.pure.u64(size), // is_long
             tx.pure.u8(direction), // margin
-            tx.object("0x6")
+            tx.object("0x6"),
         ],
-        typeArguments: [USDH_TYPE, BTC_TYPE],
+        typeArguments: [liquidityType, coinTradeType],
     });
     return tx;
 }
 
-export function buildClosePosition(marketId: string, marketType: string): Transaction {
+export function buildClosePosition(
+    liqudityCoinType: string,
+    liquidityPoolId: string,
+    priceFeedCoinTradeId: string,
+    marketId: string,
+    marketType: string,
+): Transaction {
     const tx = new Transaction();
-    
+
     const coin = tx.moveCall({
         target: `${PACKAGE_ID}::tumo_markets_core::close_position`,
-        arguments: [
-            tx.object(marketId), 
-            tx.object(LIQUIDITY_POOL_ID), 
-            tx.object(PRICE_FEED_BTC_ID),
-            tx.object("0x6")
-        ],
-        typeArguments: [USDH_TYPE, marketType],
+        arguments: [tx.object(marketId), tx.object(liquidityPoolId), tx.object(priceFeedCoinTradeId), tx.object("0x6")],
+        typeArguments: [liqudityCoinType, marketType],
     });
     tx.transferObjects([coin], signer.getPublicKey().toSuiAddress());
     return tx;
@@ -246,7 +267,7 @@ export function buildCreatePriceFeedTx(typeMarket: string): Transaction {
         target: `${PACKAGE_ID}::oracle::create_price_feed`,
         arguments: [tx.object(PRICE_FEED_CAP_ID)],
         typeArguments: [typeMarket],
-    })
+    });
     return tx;
 }
 
@@ -270,10 +291,7 @@ export function buidTransferPriceFeedCapTx(toAddress: string): Transaction {
     const tx = new Transaction();
     tx.moveCall({
         target: `${PACKAGE_ID}::oracle::transfer_price_feed_cap`,
-        arguments: [
-            tx.object(PRICE_FEED_CAP_ID),
-            tx.pure.address(toAddress),
-        ],
+        arguments: [tx.object(PRICE_FEED_CAP_ID), tx.pure.address(toAddress)],
     });
     return tx;
 }
@@ -283,11 +301,11 @@ export function buildLiquidatePositionTx(user: string): Transaction {
     const coin = tx.moveCall({
         target: `${PACKAGE_ID}::tumo_markets_core::liquidate`,
         arguments: [
-            tx.object(MARKET_BTC_ID), 
-            tx.object(LIQUIDITY_POOL_ID), 
+            tx.object(MARKET_BTC_ID),
+            tx.object(LIQUIDITY_POOL_USDH_ID),
             tx.object(PRICE_FEED_BTC_ID),
             tx.object("0x6"),
-            tx.pure.address(user)
+            tx.pure.address(user),
         ],
         typeArguments: [USDH_TYPE, BTC_TYPE],
     });
@@ -296,19 +314,18 @@ export function buildLiquidatePositionTx(user: string): Transaction {
 }
 
 async function main() {
+    const rsTransferPriceFeedCap = await client.signAndExecuteTransaction({
+        transaction: buidTransferPriceFeedCapTx('0x3668c3f8e8a524d54b3cb8226961163ed040f3865837bc0096d2e5c8e352f312'),
+        signer: signer,
+    });
+    console.log("Transfer Price Feed Cap result:");
+    console.log(rsTransferPriceFeedCap);
 
-    // const rsTransferPriceFeedCap = await client.signAndExecuteTransaction({
-    //     transaction: buidTransferPriceFeedCapTx('0x71b2250b548a6a62c40e52bab8104a8e5050292cd47b9056ed6c94f3aceb81e7'),
-    //     signer: signer,
-    // });
-    // console.log("Transfer Price Feed Cap result:");
-    // console.log(rsTransferPriceFeedCap);
+    let coins = await getCoinObject(HACKTHON_TYPE);
 
-
-    let coins = await getCoinObject(USDH_TYPE);
-    /** Test CreateLiquidityPool */
+    // /** Test CreateLiquidityPool */
     // const rsCreateLiquidityPool = await client.signAndExecuteTransaction({
-    //   transaction: buildCreateLiquidityPoolTx(USDH_TYPE),
+    //   transaction: buildCreateLiquidityPoolTx(HACKTHON_TYPE),
     //   signer: signer,
     // });
     // console.log("Create Liquidity Pool result:");
@@ -324,7 +341,7 @@ async function main() {
 
     /** Test AddLiquidity */
     // const rsAddLiquidity = await client.signAndExecuteTransaction({
-    //     transaction: buildAddLiquidityTx(LIQUIDITY_POOL_ID, coins, 10n**15n),
+    //     transaction: buildAddLiquidityTx(LIQUIDITY_POOL_HACKTHON_ID, coins, 10n**13n, HACKTHON_TYPE),
     //     signer: signer,
     // });
     // console.log("Add Liquidity result:");
@@ -357,12 +374,22 @@ async function main() {
 
     /** Test OpenPosition */
     // const rsOpenPosition = await client.signAndExecuteTransaction({
-    //     transaction: buildOpenPositionTx(1, 10n**6n, 5, coins),
+    //     transaction: buildOpenPositionTx(
+    //         HACKTHON_TYPE,
+    //         BTC_TYPE,
+    //         LIQUIDITY_POOL_HACKTHON_ID,
+    //         MARKET_BTC_ID,
+    //         PRICE_FEED_BTC_ID,
+    //         1,
+    //         10n ** 9n,
+    //         1,
+    //         coins,
+    //     ),
     //     signer: signer,
     // });
     // console.log("Open Position result:");
     // console.log(rsOpenPosition);
-    
+
     // const rsUpdatePrice = await client.signAndExecuteTransaction({
     //     transaction: buildUpdatePriceTx(1_500_000n, BTC_TYPE, PRICE_FEED_BTC_ID),
     //     signer: signer,
@@ -377,17 +404,15 @@ async function main() {
     // console.log("Price Feed Data:");
     // console.log(JSON.stringify(priceFeedData, null, 2));
 
-
     /** Lấy position của user hiện tại */
     // const myAddress = signer.getPublicKey().toSuiAddress();
     // const myPosition = await getUserPosition(MARKET_OCT_ID, myAddress);
     // console.log(`\nMy Position (${myAddress}):`);
     // console.log(JSON.stringify(myPosition, null, 2));
 
-    
     // /** Close Position */
     // const rsClosePosition = await client.signAndExecuteTransaction({
-    //     transaction: buildClosePosition(MARKET_BTC_ID, BTC_TYPE), // direction=0 (close), amount_collateral=0, leverage=1
+    //     transaction: buildClosePosition(HACKTHON_TYPE, LIQUIDITY_POOL_HACKTHON_ID, PRICE_FEED_BTC_ID, MARKET_BTC_ID, BTC_TYPE), // direction=0 (close), amount_collateral=0, leverage=1
     //     signer: signer,
     // });
     // console.log("Close Position result:");
@@ -402,12 +427,12 @@ async function main() {
     // console.log(rsEditMarketLeverage);
 
     /** Liquidate */
-    const rsLiquidate = await client.signAndExecuteTransaction({
-        transaction: buildLiquidatePositionTx(signer.getPublicKey().toSuiAddress()), // direction=1 (long)
-        signer: signer,
-    });
-    console.log("Liquidate Position result:");
-    console.log(rsLiquidate);
+    // const rsLiquidate = await client.signAndExecuteTransaction({
+    //     transaction: buildLiquidatePositionTx(signer.getPublicKey().toSuiAddress()), // direction=1 (long)
+    //     signer: signer,
+    // });
+    // console.log("Liquidate Position result:");
+    // console.log(rsLiquidate);
 }
 
 main();

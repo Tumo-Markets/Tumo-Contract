@@ -29,14 +29,14 @@ const LONG: u8 = 0;
 const SHORT: u8 = 1;
 
 
-public struct LiquidityPool<phantom USDHType> has key {
+public struct LiquidityPool<phantom LiquidityCoinType> has key {
     id: UID,
-    balance: Balance<USDHType>,
+    balance: Balance<LiquidityCoinType>,
 }
 // ==================== Market ====================
 
 public struct Market<phantom CoinXType> has key {
-    // Trading Market for CoinX/USDH
+    // Trading Market for CoinX/LiquidityCoin
     id: UID,
     leverage: u8,
     is_paused: bool,
@@ -44,8 +44,7 @@ public struct Market<phantom CoinXType> has key {
 }
 
 // ==================== Position Entity (The Ticket) ====================
-/// Đối tượng đại diện cho vị thế của User
-/// Mỗi Position là một "Ticket" riêng biệt
+
 public struct Position<phantom CoinXType> has store {
     id: ID,
     owner: address,
@@ -61,7 +60,6 @@ public struct AdminCap has key {
     id: UID,
 }
 
-/// Quyền LP (Liquidity Provider) để nạp/rút thanh khoản
 public struct LPCap has key {
     id: UID,
 }
@@ -166,8 +164,8 @@ public fun create_market<CoinXType>(_admin_cap: &AdminCap, leverage: u8, ctx: &m
     });
 }
 
-public fun create_liquidity_pool<USDHType>(_admin_cap: &AdminCap, ctx: &mut TxContext) {
-    let liquidity_pool = LiquidityPool<USDHType> {
+public fun create_liquidity_pool<LiquidityCoinType>(_admin_cap: &AdminCap, ctx: &mut TxContext) {
+    let liquidity_pool = LiquidityPool<LiquidityCoinType> {
         id: object::new(ctx),
         balance: balance::zero(),
     };
@@ -175,10 +173,10 @@ public fun create_liquidity_pool<USDHType>(_admin_cap: &AdminCap, ctx: &mut TxCo
 }
 
 // ==================== Liquidity Operations ====================
-public fun add_liquidity<USDHType>(
-    liquidity_pool: &mut LiquidityPool<USDHType>,
+public fun add_liquidity<LiquidityCoinType>(
+    liquidity_pool: &mut LiquidityPool<LiquidityCoinType>,
     _lp_cap: &LPCap,
-    payment: Coin<USDHType>,
+    payment: Coin<LiquidityCoinType>,
     ctx: &mut TxContext,
 ) {
     let provider = tx_context::sender(ctx);
@@ -199,12 +197,12 @@ public fun add_liquidity<USDHType>(
 }
 
 /// Admin/LP rút thanh khoản từ Pool
-public fun remove_liquidity<USDHType>(
-    liquidity_pool: &mut LiquidityPool<USDHType>,
+public fun remove_liquidity<LiquidityCoinType>(
+    liquidity_pool: &mut LiquidityPool<LiquidityCoinType>,
     _lp_cap: &LPCap,
     amount: u64,
     ctx: &mut TxContext,
-): Coin<USDHType> {
+): Coin<LiquidityCoinType> {
     assert!(amount > 0, EZeroAmount);
 
     let provider = tx_context::sender(ctx);
@@ -223,10 +221,10 @@ public fun remove_liquidity<USDHType>(
 
 // ==================== Position Operations ====================
 
-public fun open_position<USDHType, CoinXType>(
+public fun open_position<LiquidityCoinType, CoinXType>(
     market: &mut Market<CoinXType>,
-    liquidity_pool: &mut LiquidityPool<USDHType>,
-    payment_collateral_coin: Coin<USDHType>,
+    liquidity_pool: &mut LiquidityPool<LiquidityCoinType>,
+    payment_collateral_coin: Coin<LiquidityCoinType>,
     oracle: &PriceFeed<CoinXType>,
     size: u64,
     direction: u8,
@@ -315,13 +313,13 @@ public fun open_position<USDHType, CoinXType>(
     }
 }
 
-public fun close_position<USDHType, CoinXType>(
+public fun close_position<LiquidityCoinType, CoinXType>(
     market: &mut Market<CoinXType>,
-    liquidity_pool: &mut LiquidityPool<USDHType>,
+    liquidity_pool: &mut LiquidityPool<LiquidityCoinType>,
     oracle: &PriceFeed<CoinXType>,
     _clock: &Clock,
     ctx: &mut TxContext,
-): Coin<USDHType> {
+): Coin<LiquidityCoinType> {
     assert!(!market.is_paused, EMarketPaused);
     let sender = tx_context::sender(ctx);
     assert!(table::contains(&market.positions, sender), EPositionNotFound);
@@ -368,21 +366,21 @@ public fun close_position<USDHType, CoinXType>(
     });
 
     if (return_amount > 0) {
-        let return_balance = balance::split<USDHType>(&mut liquidity_pool.balance, return_amount);
-        coin::from_balance<USDHType>(return_balance, ctx)
+        let return_balance = balance::split<LiquidityCoinType>(&mut liquidity_pool.balance, return_amount);
+        coin::from_balance<LiquidityCoinType>(return_balance, ctx)
     } else {
-        coin::zero<USDHType>(ctx)
+        coin::zero<LiquidityCoinType>(ctx)
     }
 }
 
-public fun liquidate<USDHType, CoinXType>(
+public fun liquidate<LiquidityCoinType, CoinXType>(
     market: &mut Market<CoinXType>,
-    liquidity_pool: &mut LiquidityPool<USDHType>,
+    liquidity_pool: &mut LiquidityPool<LiquidityCoinType>,
     oracle: &PriceFeed<CoinXType>,
     clock: &Clock,
     liquidated_owner: address,
     ctx: &mut TxContext,
-): Coin<USDHType> {
+): Coin<LiquidityCoinType> {
     assert!(!market.is_paused, EMarketPaused);
     assert!(table::contains(&market.positions, liquidated_owner), EPositionNotFound);
 
@@ -462,10 +460,10 @@ public fun liquidate<USDHType, CoinXType>(
     });
 
     if (return_amount > 0) {
-        let return_balance = balance::split<USDHType>(&mut liquidity_pool.balance, return_amount);
-        coin::from_balance<USDHType>(return_balance, ctx)
+        let return_balance = balance::split<LiquidityCoinType>(&mut liquidity_pool.balance, return_amount);
+        coin::from_balance<LiquidityCoinType>(return_balance, ctx)
     } else {
-        coin::zero<USDHType>(ctx)
+        coin::zero<LiquidityCoinType>(ctx)
     }
 }
 
@@ -530,7 +528,7 @@ public fun transfer_lp_cap(lp_cap: LPCap, new_lp: address) {
 
 // ==================== View Functions ====================
 
-public fun is_paused<USDHType>(market: &Market<USDHType>): bool {
+public fun is_paused<LiquidityCoinType>(market: &Market<LiquidityCoinType>): bool {
     market.is_paused
 }
 
